@@ -11,7 +11,16 @@ from jobflow.config import get_settings
 
 logger = logging.getLogger(__name__)
 
-Provider = Literal["ollama", "openai", "none"]
+Provider = Literal["ollama", "groq", "openai", "none"]
+
+GROQ_BASE_URL = "https://api.groq.com/openai/v1"
+
+
+def _truncate(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + "\n...[truncated]"
+
 
 def _strip_thinking(content: str) -> str:
     """Remove Qwen-style reasoning blocks from model output."""
@@ -37,29 +46,59 @@ def _parse_json_content(content: str) -> dict[str, Any]:
 
 
 class LLMClient:
-    """LLM wrapper — supports Ollama (local) and OpenAI. Falls back to heuristics when unavailable."""
+    """LLM wrapper — supports Ollama (local), Groq (free hosted), and OpenAI."""
 
     def __init__(self) -> None:
         self.settings = get_settings()
         self.provider: Provider = "none"
         self._openai_client = None
+        self._active_model = ""
 
         if self.settings.llm_provider == "ollama":
             if self._ollama_reachable():
                 self.provider = "ollama"
-                logger.info("LLM: using Ollama model %s", self.settings.ollama_model)
+                self._active_model = self.settings.ollama_model
+                logger.info("LLM: using Ollama model %s", self._active_model)
             else:
                 logger.warning("LLM: Ollama not reachable at %s", self.settings.ollama_base_url)
+        elif self.settings.llm_provider == "groq":
+            self._init_openai_compatible(
+                api_key=self.settings.groq_api_key,
+                base_url=GROQ_BASE_URL,
+                provider="groq",
+                model=self.settings.groq_model,
+            )
         elif self.settings.llm_provider == "openai":
-            if self.settings.openai_api_key and self.settings.openai_api_key not in ("", "sk-..."):
-                try:
-                    from openai import OpenAI
+            self._init_openai_compatible(
+                api_key=self.settings.openai_api_key,
+                base_url=None,
+                provider="openai",
+                model=self.settings.openai_model,
+            )
 
-                    self._openai_client = OpenAI(api_key=self.settings.openai_api_key)
-                    self.provider = "openai"
-                    logger.info("LLM: using OpenAI model %s", self.settings.openai_model)
-                except Exception as exc:
-                    logger.warning("LLM: OpenAI init failed: %s", exc)
+    def _init_openai_compatible(
+        self,
+        *,
+        api_key: str,
+        base_url: str | None,
+        provider: Provider,
+        model: str,
+    ) -> None:
+        if not api_key or api_key in ("", "sk-...", "gsk_..."):
+            logger.warning("LLM: %s API key not configured", provider)
+            return
+        try:
+            from openai import OpenAI
+
+            kwargs: dict[str, Any] = {"api_key": api_key}
+            if base_url:
+                kwargs["base_url"] = base_url
+            self._openai_client = OpenAI(**kwargs)
+            self.provider = provider
+            self._active_model = model
+            logger.info("LLM: using %s model %s", provider, model)
+        except Exception as exc:
+            logger.warning("LLM: %s init failed: %s", provider, exc)
 
     @property
     def enabled(self) -> bool:
@@ -69,7 +108,7 @@ class LLMClient:
         return {
             "enabled": self.enabled,
             "provider": self.provider,
-            "model": self.settings.ollama_model if self.provider == "ollama" else self.settings.openai_model,
+            "model": self._active_model,
         }
 
     def _ollama_reachable(self) -> bool:
@@ -80,19 +119,28 @@ class LLMClient:
             return False
 
     def _ollama_chat(self, messages: list[dict[str, str]], *, json_mode: bool = False) -> str:
+        num_predict = (
+            self.settings.ollama_num_predict_json if json_mode else self.settings.ollama_num_predict_text
+        )
         payload: dict[str, Any] = {
             "model": self.settings.ollama_model,
             "messages": messages,
             "stream": False,
-            "options": {"temperature": 0.2 if json_mode else 0.4},
+            "options": {
+                "temperature": 0.2 if json_mode else 0.4,
+                "num_predict": num_predict,
+            },
         }
+        if not self.settings.ollama_think:
+            payload["think"] = False
         if json_mode:
             payload["format"] = "json"
 
+        timeout = httpx.Timeout(self.settings.ollama_timeout, connect=10.0)
         resp = httpx.post(
             f"{self.settings.ollama_base_url.rstrip('/')}/api/chat",
             json=payload,
-            timeout=self.settings.ollama_timeout,
+            timeout=timeout,
         )
         resp.raise_for_status()
         return resp.json()["message"]["content"]
@@ -101,9 +149,9 @@ class LLMClient:
         if self.provider == "ollama":
             return self._ollama_chat(messages, json_mode=json_mode)
 
-        if self.provider == "openai" and self._openai_client:
+        if self.provider in ("openai", "groq") and self._openai_client:
             kwargs: dict[str, Any] = {
-                "model": self.settings.openai_model,
+                "model": self._active_model,
                 "temperature": 0.2 if json_mode else 0.4,
                 "messages": messages,
             }
@@ -115,6 +163,7 @@ class LLMClient:
         return None
 
     def complete_json(self, system: str, user: str, fallback: dict[str, Any]) -> dict[str, Any]:
+        user = _truncate(user, self.settings.llm_max_input_chars)
         messages = [
             {"role": "system", "content": system + "\nRespond with valid JSON only."},
             {"role": "user", "content": user},
@@ -125,9 +174,11 @@ class LLMClient:
                 return _parse_json_content(content)
         except Exception as exc:
             logger.warning("LLM JSON call failed (%s): %s", self.provider, exc)
+        logger.info("LLM JSON using heuristic fallback")
         return fallback
 
     def complete_text(self, system: str, user: str, fallback: str) -> str:
+        user = _truncate(user, self.settings.llm_max_input_chars)
         messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
@@ -138,6 +189,7 @@ class LLMClient:
                 return _strip_thinking(content) or content
         except Exception as exc:
             logger.warning("LLM text call failed (%s): %s", self.provider, exc)
+        logger.info("LLM text using heuristic fallback")
         return fallback
 
 

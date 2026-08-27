@@ -6,12 +6,24 @@ from typing import Any
 
 from arq import create_pool
 from arq.connections import RedisSettings
+from redis.asyncio import from_url as redis_from_url
 
 from jobflow.config import get_settings
 from jobflow.db import SessionLocal
 from jobflow.services.bootstrap import mark_task_done, mark_task_failed, mark_task_running
 
 logger = logging.getLogger(__name__)
+
+
+async def redis_available() -> bool:
+    """Quick check — avoids arq's multi-retry enqueue when Redis is down."""
+    try:
+        client = redis_from_url(get_settings().redis_url, socket_connect_timeout=1)
+        await client.ping()
+        await client.aclose()
+        return True
+    except Exception:
+        return False
 
 
 async def process_job_task(ctx: dict, task_id: str, job_id: str, candidate_id: str, contact_id: str | None = None) -> dict[str, Any]:
@@ -54,7 +66,7 @@ class WorkerSettings:
     functions = [process_job_task, ingest_webhook_task]
     redis_settings = RedisSettings.from_dsn(get_settings().redis_url)
     max_jobs = 10
-    job_timeout = 600
+    job_timeout = 1800
 
 
 async def enqueue_task(task_type: str, task_id: str, **kwargs: Any) -> str:

@@ -26,11 +26,17 @@ class Settings(BaseSettings):
     # CORS
     cors_origins: str = "http://localhost:5173,http://localhost:3000,http://localhost:8000"
 
-    # LLM — ollama (local) or openai
-    llm_provider: str = "ollama"  # ollama | openai
+    # LLM — ollama (local), groq (free hosted), or openai
+    llm_provider: str = "ollama"  # ollama | groq | openai
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "qwen3:8b"
-    ollama_timeout: float = 120.0
+    ollama_timeout: float = 300.0
+    ollama_think: bool = False  # qwen3 thinking models are much slower when enabled
+    ollama_num_predict_json: int = 1024
+    ollama_num_predict_text: int = 2048
+    llm_max_input_chars: int = 8000
+    groq_api_key: str = ""
+    groq_model: str = "llama-3.3-70b-versatile"
     openai_api_key: str = ""
     openai_model: str = "gpt-4o-mini"
     match_threshold: int = 70

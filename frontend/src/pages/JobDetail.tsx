@@ -18,27 +18,38 @@ export default function JobDetail() {
   const process = async () => {
     if (!id) return
     setProcessing(true)
-    setMessage('')
+    setMessage('Running match and preparing application — this may take a minute...')
     try {
-      const result = await api.processJob(id)
+      const result = await api.processJob(id, false)
       if (result.application_id) {
         navigate(`/applications/${result.application_id}`)
-      } else if (result.task_id) {
-        setMessage('Processing in background...')
-        const poll = setInterval(async () => {
-          const task = await api.task(result.task_id!)
-          if (task.status === 'succeeded' && task.result?.application_id) {
-            clearInterval(poll)
-            navigate(`/applications/${task.result.application_id}`)
-          } else if (task.status === 'failed') {
-            clearInterval(poll)
-            setMessage(task.error || 'Processing failed')
-          }
-        }, 2000)
-      } else {
-        setMessage(`Decision: ${result.decision}`)
-        if (id) api.job(id).then(setJob)
+        return
       }
+      if (result.task_id) {
+        setMessage('Processing in background...')
+        await new Promise<void>((resolve, reject) => {
+          const poll = setInterval(async () => {
+            try {
+              const task = await api.task(result.task_id!)
+              if (task.status === 'succeeded' && task.result?.application_id) {
+                clearInterval(poll)
+                navigate(`/applications/${task.result.application_id}`)
+                resolve()
+              } else if (task.status === 'failed') {
+                clearInterval(poll)
+                setMessage(task.error || 'Processing failed')
+                reject(new Error(task.error || 'Processing failed'))
+              }
+            } catch (err) {
+              clearInterval(poll)
+              reject(err)
+            }
+          }, 2000)
+        })
+        return
+      }
+      setMessage(`Decision: ${result.decision}`)
+      if (id) api.job(id).then(setJob)
     } catch (err) {
       setMessage(err instanceof Error ? err.message : 'Failed')
     } finally {

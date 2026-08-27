@@ -36,7 +36,7 @@ class JobAnalyzerAgent(BaseAgent):
                 "You analyze job postings. Return JSON with keys: summary, required_skills, "
                 "nice_to_have, seniority, role_family, key_responsibilities."
             ),
-            user=f"Title: {job.title}\nDescription: {job.description}",
+            user=f"Title: {job.title}\nDescription: {(job.description or '')[:4000]}",
             fallback=fallback,
         )
 
